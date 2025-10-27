@@ -199,19 +199,11 @@ JpegCoderBytes* JpegCoder::encode(JpegCoderImage* img, int quality){
     cuMemFree(bgrFrame);
     cuMemFree(yuvFrame);
 
-    unsigned long out_buf_size = img->width * img->height * 3;
+    unsigned long out_buf_size = img->width * img->height * 3 / 2;
     unsigned char *out_buf = new unsigned char[out_buf_size];
     int nReturnCode = nv_encodere->encodeFromBuffer(buffer, JCS_YCbCr, &out_buf, out_buf_size, quality);
     if (0 != nReturnCode){
         throw JpegCoderError(nReturnCode, "NvJpeg Encoder Error");
-    }
-
-    if (out_buf_size > img->width * img->height * 3 / 2)
-    {
-        // delete nv_encodere and create a new one to clear internal buffer
-        delete nv_encodere;
-        nv_encodere = NvJPEGEncoder::createJPEGEncoder("nvjpeg-python:encoder");
-        JPEGCODER_GLOBAL_CONTEXT->nv_encoder = nv_encodere;
     }
     
     JpegCoderBytes* jpegData = new JpegCoderBytes(out_buf, out_buf_size);
