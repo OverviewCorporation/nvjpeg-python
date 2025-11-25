@@ -181,7 +181,7 @@ JpegCoderBytes* JpegCoder::encode(JpegCoderImage* img, int quality){
         throw JpegCoderError(error_code, cudaGetErrorString(eCopy));
     }
     // Use BT.601 color space for JPEG (standard for JPEG/JFIF)
-    BGRToYUV420((uint8_t*)bgrFrame, (uint8_t*)yuvFrame, img->width, img->height, 6);
+    BGRToYUV420((uint8_t*)bgrFrame, (uint8_t*)yuvFrame, img->width, img->height, ColorSpaceStandard_BT601);
     eCopy = cudaMemcpy(yuv_data, (uint8_t*)yuvFrame, yuvframeSize, cudaMemcpyDeviceToHost);
     if(eCopy != cudaSuccess){
         throw JpegCoderError(error_code, cudaGetErrorString(eCopy));
