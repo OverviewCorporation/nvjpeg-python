@@ -139,10 +139,10 @@ JpegCoderImage* JpegCoder::decode(const unsigned char* jpegData, size_t length){
     }
     switch(subsampling){
         case JPEGCODER_CSS_420:
-            YUV420ToColor32<BGRA32>((uint8_t*)nv12Frame, width, (uint8_t *)dpFrame, 4 * width, width, height);
+            YUV420ToColor32<BGRA32>((uint8_t*)nv12Frame, width, (uint8_t *)dpFrame, 4 * width, width, height, ColorSpaceStandard_BT601);
         break;
         case JPEGCODER_CSS_444:
-            YUV444ToColor32<BGRA32>((uint8_t*)nv12Frame, width, (uint8_t *)dpFrame, 4 * width, width, height);
+            YUV444ToColor32<BGRA32>((uint8_t*)nv12Frame, width, (uint8_t *)dpFrame, 4 * width, width, height, ColorSpaceStandard_BT601);
         break;
         default:
             throw JpegCoderError(pixfmt, "Unknown pixfmt");

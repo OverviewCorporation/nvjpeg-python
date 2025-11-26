@@ -84,6 +84,21 @@ void SetMatRgb2Yuv(int iMatrix) {
     }
     cudaMemcpyToSymbol(matRgb2Yuv, mat, sizeof(mat));
 }
+// Full range YUV to RGB conversion for JPEG decoding
+// JPEG uses full range YUV (0-255) not limited/studio range (16-235)
+void SetMatYuv2RgbFullRange(int iMatrix) {
+    float wr, wb;
+    int black, white, max;
+    GetConstants(iMatrix, wr, wb, black, white, max);
+    float mat[3][3] = {
+        1.0f, 0.0f, (1.0f - wr) / 0.5f,
+        1.0f, -wb * (1.0f - wb) / 0.5f / (1 - wb - wr), -wr * (1 - wr) / 0.5f / (1 - wb - wr),
+        1.0f, (1.0f - wb) / 0.5f, 0.0f,
+    };
+    // No scaling applied - full range
+    cudaMemcpyToSymbol(matYuv2Rgb, mat, sizeof(mat));
+}
+
 
 // Full range RGB to YUV conversion for JPEG encoding (no limited range scaling)
 // JPEG uses full range YUV (0-255) not limited/studio range (16-235)
@@ -113,6 +128,30 @@ __device__ inline Rgb YuvToRgbForPixel(YuvUnit y, YuvUnit u, YuvUnit v) {
         mid = 1 << (sizeof(YuvUnit) * 8 - 1);
     float fy = (int)y - low, fu = (int)u - mid, fv = (int)v - mid;
     const float maxf = (1 << sizeof(YuvUnit) * 8) - 1.0f;
+    YuvUnit
+        r = (YuvUnit)Clamp(matYuv2Rgb[0][0] * fy + matYuv2Rgb[0][1] * fu + matYuv2Rgb[0][2] * fv, 0.0f, maxf),
+        g = (YuvUnit)Clamp(matYuv2Rgb[1][0] * fy + matYuv2Rgb[1][1] * fu + matYuv2Rgb[1][2] * fv, 0.0f, maxf),
+        b = (YuvUnit)Clamp(matYuv2Rgb[2][0] * fy + matYuv2Rgb[2][1] * fu + matYuv2Rgb[2][2] * fv, 0.0f, maxf);
+
+    Rgb rgb{};
+    const int nShift = abs((int)sizeof(YuvUnit) - (int)sizeof(rgb.c.r)) * 8;
+    if (sizeof(YuvUnit) >= sizeof(rgb.c.r)) {
+        rgb.c.r = r >> nShift;
+        rgb.c.g = g >> nShift;
+        rgb.c.b = b >> nShift;
+    } else {
+        rgb.c.r = r << nShift;
+        rgb.c.g = g << nShift;
+        rgb.c.b = b << nShift;
+    }
+    return rgb;
+}
+// Full range version for JPEG decoding (no Y offset of 16)
+template<class Rgb, class YuvUnit>
+__device__ inline Rgb YuvToRgbForPixelFullRange(YuvUnit y, YuvUnit u, YuvUnit v) {
+    const int mid = 1 << (sizeof(YuvUnit) * 8 - 1);
+    float fy = (float)y, fu = (int)u - mid, fv = (int)v - mid;
+    const float maxf = (1 << sizeof(YuvUnit) * 8) - 1.0f;
     YuvUnit 
         r = (YuvUnit)Clamp(matYuv2Rgb[0][0] * fy + matYuv2Rgb[0][1] * fu + matYuv2Rgb[0][2] * fv, 0.0f, maxf),
         g = (YuvUnit)Clamp(matYuv2Rgb[1][0] * fy + matYuv2Rgb[1][1] * fu + matYuv2Rgb[1][2] * fv, 0.0f, maxf),
@@ -132,6 +171,7 @@ __device__ inline Rgb YuvToRgbForPixel(YuvUnit y, YuvUnit u, YuvUnit v) {
     return rgb;
 }
 
+
 template<class Rgb, class RgbIntx2>
 __global__ static void Yuv420ToRgbKernel(uint8_t *pYuv, int nYuvPitch, uint8_t *pRgb, int nRgbPitch, int nWidth, int nHeight) {
     int x = (threadIdx.x + blockIdx.x * blockDim.x) * 2;
@@ -147,7 +187,7 @@ __global__ static void Yuv420ToRgbKernel(uint8_t *pYuv, int nYuvPitch, uint8_t *
     for(int j=0;j<2;j++){
         for(int k=0;k<2;k++){
             uint8_t* pY = pYuv + nWidth*(y+k) + (x+j);
-            Rgb c = YuvToRgbForPixel<Rgb>(pY[0], u, v);
+            Rgb c = YuvToRgbForPixelFullRange<Rgb>(pY[0], u, v);
             uint8_t* pC = (uint8_t*)&c;
             uint8_t *pOutput = (pRgb + (x+j) * 3 + (y+k) * nWidth * 3);
             pOutput[0] = pC[0];
@@ -172,7 +212,7 @@ __global__ static void Yuv444ToRgbKernel(uint8_t *pYuv, int nYuvPitch, uint8_t *
             uint8_t U = *(pYuv + nWidth * nHeight + (y+k)*nWidth + (x+j));
             uint8_t V = *(pYuv + nWidth * nHeight * 2 + (y+k)*nWidth + (x+j));
 
-            Rgb c = YuvToRgbForPixel<Rgb>(Y, U, V);
+            Rgb c = YuvToRgbForPixelFullRange<Rgb>(Y, U, V);
             uint8_t* pC = (uint8_t*)&c;
             uint8_t *pOutput = (pRgb + (x+j) * 3 + (y+k) * nWidth * 3);
             pOutput[0] = pC[0];
@@ -280,7 +320,7 @@ __global__ static void BgrToYuvFullRangeKernel(uint8_t *pRgb, uint8_t *pYuv, int
 
 template <class COLOR32>
 void YUV420ToColor32(uint8_t *dpYuv420, int nPitch, uint8_t *dpBgra, int nBgraPitch, int nWidth, int nHeight, int iMatrix) {
-    SetMatYuv2Rgb(iMatrix);
+    SetMatYuv2RgbFullRange(iMatrix);
     Yuv420ToRgbKernel<COLOR32, uint2>
         <<<dim3((nWidth + 63) / 32 / 2, (nHeight + 3) / 2 / 2), dim3(32, 2)>>>
         (dpYuv420, nPitch, dpBgra, nBgraPitch, nWidth, nHeight);
@@ -288,7 +328,7 @@ void YUV420ToColor32(uint8_t *dpYuv420, int nPitch, uint8_t *dpBgra, int nBgraPi
 
 template <class COLOR32>
 void YUV444ToColor32(uint8_t *dpYUV444, int nPitch, uint8_t *dpBgra, int nBgraPitch, int nWidth, int nHeight, int iMatrix) {
-    SetMatYuv2Rgb(iMatrix);
+    SetMatYuv2RgbFullRange(iMatrix);
     Yuv444ToRgbKernel<uchar2, COLOR32, uint2>
         <<<dim3((nWidth + 63) / 32 / 2, (nHeight + 3) / 2), dim3(32, 2) >>>
         (dpYUV444, nPitch, dpBgra, nBgraPitch, nWidth, nHeight);
