@@ -6,27 +6,29 @@
 #include <cuda_runtime.h>
 #include <CUDAHelper.h>
 #include <map>
+#include <mutex>
 
 #ifndef NVJPEG_MAX_COMPONENT
 #define NVJPEG_MAX_COMPONENT 4
 #endif
 
-void* JpegCoder::_global_context = nullptr;
+// Global mutex to protect CUDA context operations
+static std::mutex g_cuda_mutex;
 
+// Global CUDA context map (shared across all instances)
+static std::map<long, CUcontext*>* g_cudaContextMap = nullptr;
+
+// Per-instance context structure
 typedef struct
 {
     NvJPEGEncoder* nv_encoder;
     NvJPEGDecoder* nv_decoder;
-    std::map<long, CUcontext*>* cudaContextMap;
-}NvJpegGlobalContext;
+}NvJpegLocalContext;
 
-#define JPEGCODER_GLOBAL_CONTEXT ((NvJpegGlobalContext*)(JpegCoder::_global_context))
+#define JPEGCODER_LOCAL_CONTEXT ((NvJpegLocalContext*)(this->_local_context))
 
-// typedef struct
-// {
-// }NvJpegLocalContext;
-
-// #define JPEGCODER_LOCAL_CONTEXT ((NvJpegLocalContext*)(this->_local_context))
+// Legacy global context pointer - kept for cleanUpEnv compatibility
+void* JpegCoder::_global_context = nullptr;
 
 JpegCoderImage::JpegCoderImage(size_t width, size_t height, short nChannel, JpegCoderChromaSubsampling subsampling){
     this->img = malloc(width * height * nChannel);
@@ -54,45 +56,51 @@ JpegCoderImage::~JpegCoderImage(){
 
 
 JpegCoder::JpegCoder(){
-    if(JpegCoder::_global_context == nullptr){
-        JpegCoder::_global_context = malloc(sizeof(NvJpegGlobalContext));
-        JPEGCODER_GLOBAL_CONTEXT->cudaContextMap = new std::map<long, CUcontext*>();
-        JPEGCODER_GLOBAL_CONTEXT->nv_decoder = NvJPEGDecoder::createJPEGDecoder("nvjpeg-python:decoder");
-        JPEGCODER_GLOBAL_CONTEXT->nv_encoder = NvJPEGEncoder::createJPEGEncoder("nvjpeg-python:encoder");
+    // Initialize global CUDA context map if needed
+    {
+        std::lock_guard<std::mutex> lock(g_cuda_mutex);
+        if(g_cudaContextMap == nullptr){
+            g_cudaContextMap = new std::map<long, CUcontext*>();
+        }
     }
+    
+    // Create per-instance encoder/decoder
+    this->_local_context = malloc(sizeof(NvJpegLocalContext));
+    JPEGCODER_LOCAL_CONTEXT->nv_decoder = NvJPEGDecoder::createJPEGDecoder("nvjpeg-python:decoder");
+    JPEGCODER_LOCAL_CONTEXT->nv_encoder = NvJPEGEncoder::createJPEGEncoder("nvjpeg-python:encoder");
 }
 
 JpegCoder::~JpegCoder(){
-    // ArgusSamples::cleanupCUDA((CUcontext*)_local_context);
-    // free(_local_context);
-    _local_context = nullptr;
+    if(this->_local_context != nullptr) {
+        delete(JPEGCODER_LOCAL_CONTEXT->nv_decoder);
+        delete(JPEGCODER_LOCAL_CONTEXT->nv_encoder);
+        free(this->_local_context);
+        this->_local_context = nullptr;
+    }
 }
 
 void JpegCoder::cleanUpEnv(){
-    if(JpegCoder::_global_context != nullptr) {
-      delete(JPEGCODER_GLOBAL_CONTEXT->nv_decoder);
-      delete(JPEGCODER_GLOBAL_CONTEXT->nv_encoder);
-      for(auto cudaContext: *(JPEGCODER_GLOBAL_CONTEXT->cudaContextMap)){
-         ArgusSamples::cleanupCUDA(cudaContext.second);
-      }
-      delete(JPEGCODER_GLOBAL_CONTEXT->cudaContextMap);
-    //   ArgusSamples::cleanupCUDA(&(JPEGCODER_GLOBAL_CONTEXT->g_cudaContext));
-      free(JpegCoder::_global_context);
-      JpegCoder::_global_context = nullptr;
+    std::lock_guard<std::mutex> lock(g_cuda_mutex);
+    if(g_cudaContextMap != nullptr) {
+        for(auto cudaContext: *g_cudaContextMap){
+            ArgusSamples::cleanupCUDA(cudaContext.second);
+        }
+        delete(g_cudaContextMap);
+        g_cudaContextMap = nullptr;
     }
 }
 
 void JpegCoder::ensureThread(long threadIdent){
-    // printf("threadIdent Id: %ld\n", threadIdent);
-    if(JPEGCODER_GLOBAL_CONTEXT->cudaContextMap->count(threadIdent) == 0){
+    std::lock_guard<std::mutex> lock(g_cuda_mutex);
+    if(g_cudaContextMap->count(threadIdent) == 0){
         CUcontext* context = (CUcontext*)malloc(sizeof(CUcontext));
         ArgusSamples::initCUDA(context);
-        (*JPEGCODER_GLOBAL_CONTEXT->cudaContextMap)[threadIdent] = context;
+        (*g_cudaContextMap)[threadIdent] = context;
     }
 }
 
 JpegCoderImage* JpegCoder::decode(const unsigned char* jpegData, size_t length){
-    NvJPEGDecoder* nv_decoder = JPEGCODER_GLOBAL_CONTEXT->nv_decoder;
+    NvJPEGDecoder* nv_decoder = JPEGCODER_LOCAL_CONTEXT->nv_decoder;
 
     uint32_t pixfmt, width, height;
     NvBuffer* buffer;
@@ -140,10 +148,10 @@ JpegCoderImage* JpegCoder::decode(const unsigned char* jpegData, size_t length){
     switch(subsampling){
         case JPEGCODER_CSS_420:
             YUV420ToColor32<BGRA32>((uint8_t*)nv12Frame, width, (uint8_t *)dpFrame, 4 * width, width, height, ColorSpaceStandard_BT601);
-        break;
+            break;
         case JPEGCODER_CSS_444:
             YUV444ToColor32<BGRA32>((uint8_t*)nv12Frame, width, (uint8_t *)dpFrame, 4 * width, width, height, ColorSpaceStandard_BT601);
-        break;
+            break;
         default:
             throw JpegCoderError(pixfmt, "Unknown pixfmt");
     }
@@ -159,7 +167,7 @@ JpegCoderImage* JpegCoder::decode(const unsigned char* jpegData, size_t length){
 }
 
 JpegCoderBytes* JpegCoder::encode(JpegCoderImage* img, int quality){
-    NvJPEGEncoder *nv_encodere = JPEGCODER_GLOBAL_CONTEXT->nv_encoder;
+    NvJPEGEncoder *nv_encoder = JPEGCODER_LOCAL_CONTEXT->nv_encoder;
 
     NvBuffer buffer(V4L2_PIX_FMT_YUV420M, img->width, img->height, 0);
     buffer.allocateMemory();
@@ -200,22 +208,13 @@ JpegCoderBytes* JpegCoder::encode(JpegCoderImage* img, int quality){
     cuMemFree(bgrFrame);
     cuMemFree(yuvFrame);
 
-    unsigned long out_buf_size = img->width * img->height * 3;
+    unsigned long out_buf_size = img->width * img->height * 3 / 2;
     unsigned char *out_buf = new unsigned char[out_buf_size];
-    int nReturnCode = nv_encodere->encodeFromBuffer(buffer, JCS_YCbCr, &out_buf, out_buf_size, quality);
+    int nReturnCode = nv_encoder->encodeFromBuffer(buffer, JCS_YCbCr, &out_buf, out_buf_size, quality);
     if (0 != nReturnCode){
         throw JpegCoderError(nReturnCode, "NvJpeg Encoder Error");
-    }
-
-    if (out_buf_size > img->width * img->height * 3 / 2)
-    {
-        // delete nv_encodere and create a new one to clear internal buffer
-        delete nv_encodere;
-        nv_encodere = NvJPEGEncoder::createJPEGEncoder("nvjpeg-python:encoder");
-        JPEGCODER_GLOBAL_CONTEXT->nv_encoder = nv_encodere;
     }
     
     JpegCoderBytes* jpegData = new JpegCoderBytes(out_buf, out_buf_size);
     return jpegData;
 }
-
