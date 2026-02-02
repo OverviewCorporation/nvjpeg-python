@@ -21,9 +21,11 @@ if platform.system() == 'Linux':
                 '/usr/src/jetson_multimedia_api/samples/common/classes/NvJpegDecoder.cpp', '/usr/src/jetson_multimedia_api/samples/common/classes/NvJpegEncoder.cpp',
                 '/usr/src/jetson_multimedia_api/samples/common/classes/NvBuffer.cpp', '/usr/src/jetson_multimedia_api/samples/common/classes/NvElement.cpp',
                 '/usr/src/jetson_multimedia_api/samples/common/classes/NvLogging.cpp', '/usr/src/jetson_multimedia_api/samples/common/classes/NvElementProfiler.cpp',
-                '/usr/src/jetson_multimedia_api/argus/samples/utils/CUDAHelper.cpp'
+                # Use local patched CUDAHelper.cpp that uses cuDevicePrimaryCtxRetain instead of cuCtxCreate
+                # to share CUDA context with CuPy/TensorRT and avoid CUDA_ERROR_INVALID_HANDLE
+                'src/jetson/utils/CUDAHelper.cpp'
             ], 
-            ['include', '/usr/src/jetson_multimedia_api/argus/samples/utils', '/usr/src/jetson_multimedia_api/include', '/usr/src/jetson_multimedia_api/include/libjpeg-8b', numpy.get_include()], 
+            ['include', 'src/jetson/utils', '/usr/src/jetson_multimedia_api/argus/samples/utils', '/usr/src/jetson_multimedia_api/include', '/usr/src/jetson_multimedia_api/include/libjpeg-8b', numpy.get_include()],
             [('JPEGCODER_ARCH', 'jetson')],
             library_dirs=['/usr/lib/aarch64-linux-gnu/tegra', 'build/lib'],
             libraries=['color_space', 'cudart', 'nvjpeg', 'cuda']
@@ -31,7 +33,7 @@ if platform.system() == 'Linux':
     else:
         # x86 or x86_64
         extension_nvjpeg = Extension('nvjpeg', 
-            ['nvjpeg-python.cpp', 'src/x86/JpegCoder.cpp'], 
+            ['nvjpeg-python.cpp', 'src/x86/JpegCoder.cpp'],
             ['include', numpy.get_include()], 
             [('JPEGCODER_ARCH', 'x86')],
         )
@@ -42,7 +44,7 @@ elif platform.system() == 'Windows':
     else:
         cuda_lib = '%s\\lib\\Win32' % (os.environ['CUDA_PATH'],)
     extension_nvjpeg = Extension('nvjpeg', 
-        ['nvjpeg-python.cpp', 'src\\x86\\JpegCoder.cpp'], 
+        ['nvjpeg-python.cpp', 'src\\x86\\JpegCoder.cpp'],
         ['include', numpy.get_include(), cuda_include], 
         [('JPEGCODER_ARCH', 'x86')],
         library_dirs=[cuda_lib],
@@ -50,7 +52,7 @@ elif platform.system() == 'Windows':
 
 
 setup(name='pynvjpeg',
-    version='0.0.13',
+    version='0.0.14',
     ext_modules=[extension_nvjpeg],
     author="Usingnet",
     author_email="developer@usingnet.com",
